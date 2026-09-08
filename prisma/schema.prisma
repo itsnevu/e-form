@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubmissionStatus {
+  AWAITING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+}
+
+model Submission {
+  id           String           @id @default(cuid())
+  publicToken  String           @unique @default(cuid())
+  name         String
+  email        String
+  answers      Json
+  amount       Int
+  status       SubmissionStatus @default(AWAITING_REVIEW)
+
+  proofPath    String
+  proofMime    String
+  proofSize    Int
+  senderName   String?
+
+  reviewedAt   DateTime?
+  reviewedBy   String?
+  rejectReason String?
+  emailSentAt  DateTime?
+  emailError   String?
+
+  createdAt    DateTime @default(now())
+
+  @@index([status, createdAt])
+}

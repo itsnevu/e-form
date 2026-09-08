@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Form Pendaftaran + Verifikasi Pembayaran
 
-## Getting Started
+Form publik → upload bukti transfer → dashboard admin → bulk approve → email otomatis.
 
-First, run the development server:
+## Yang perlu kamu ubah sebelum dipakai
+
+**`src/config/form.ts`** — satu-satunya file untuk isi form:
+- `EVENT.org`, `EVENT.title`, `EVENT.description` — branding
+- `EVENT.price` — nominal (integer rupiah)
+- `EVENT.bank` — nama bank, nomor rekening, atas nama
+- `FIELDS` — daftar pertanyaan. Tambah/hapus/urutkan bebas.
+
+Field `id` yang dipakai sebagai nama & email peserta diatur di `IDENTITY`.
+Tidak perlu migrasi database saat mengubah pertanyaan — jawaban disimpan sebagai JSON.
+
+## Jalankan lokal
 
 ```bash
+cp .env.example .env      # isi DATABASE_URL, AUTH_SECRET, SMTP_*, ADMIN_*
+npm install
+npx prisma migrate deploy
+npm run seed              # buat akun admin dari ADMIN_EMAIL/ADMIN_PASSWORD
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- Form publik: `/`
+- Login admin: `/authorize` (tidak di-link dari halaman publik, `noindex`)
+- Dashboard: `/dashboard`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Setelah admin dibuat, kosongkan `ADMIN_PASSWORD` di `.env`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Deploy ke VPS
 
-## Learn More
+```bash
+# 1. Postgres
+docker run -d --name gform-db --restart unless-stopped \
+  -e POSTGRES_PASSWORD=<kuat> -e POSTGRES_DB=gform \
+  -v /srv/gform/pgdata:/var/lib/postgresql/data -p 127.0.0.1:5432:5432 postgres:16-alpine
 
-To learn more about Next.js, take a look at the following resources:
+# 2. App
+git clone <repo> /srv/gform/app && cd /srv/gform/app
+cp .env.example .env && $EDITOR .env          # UPLOAD_DIR=/srv/gform/uploads
+npm ci && npx prisma migrate deploy && npm run seed && npm run build
+pm2 start npm --name gform -- start && pm2 save && pm2 startup
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**Caddyfile:**
+```
+domain.com {
+    encode gzip
+    request_body { max_size 10MB }
+    reverse_proxy 127.0.0.1:3000
+    header Strict-Transport-Security "max-age=31536000"
+    @private path /authorize* /dashboard*
+    header @private X-Robots-Tag "noindex, nofollow"
+}
+```
+`request_body max_size` wajib — default Caddy 10MB, tapi eksplisit lebih aman daripada
+upload 5MB tertolak diam-diam.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Email
 
-## Deploy on Vercel
+Isi `SMTP_HOST/PORT/USER/PASS` untuk `admin@domain.com`, lalu **pasang SPF, DKIM, dan DMARC**
+di DNS domain. Tanpa itu email approval hampir pasti masuk spam.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Catatan: port 25 keluar biasanya diblokir provider VPS dan IP VPS baru sering masuk blacklist —
+gunakan SMTP relay di port 587, jangan pasang mail server sendiri.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Kalau kuota SMTP terbatas (shared hosting sering 200/jam), turunkan `EMAIL_RATE_PER_MINUTE`
+dan approve per batch ~50 baris.
+
+## Cara kerja approval
+
+Status disimpan **sebelum** email dikirim. Kalau SMTP gagal, keputusan approve tidak hilang;
+barisnya ditandai "Email gagal terkirim" di tabel dan bisa diproses ulang. Baris yang sudah
+diputuskan tidak bisa di-approve dua kali (API menolak dengan 409), jadi klik ganda tidak
+mengirim email dobel.
+
+## Backup
+
+```bash
+docker exec gform-db pg_dump -U postgres gform | gzip > /backup/db-$(date +%F).sql.gz
+tar czf /backup/uploads-$(date +%F).tar.gz -C /srv/gform/uploads .
+```
+Salin ke luar VPS, dan uji restore sekali sebelum acara dimulai.
+
+## Catatan keamanan
+
+- Bukti bayar disimpan di luar `public/` dan hanya bisa diakses lewat `/api/proof/[id]`
+  yang mengecek session. Jangan pindahkan ke folder statis.
+- Tipe file divalidasi dari magic bytes, bukan dari header browser.
+- Rate limit submit 5/jam per IP, disimpan in-memory — akurat selama app jalan satu proses.
+  Kalau nanti di-scale ke banyak instance, pindahkan ke Postgres atau Redis.
